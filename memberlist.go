@@ -655,6 +655,8 @@ func (m *Memberlist) Leave(timeout time.Duration) error {
 
 		m.nodeLock.Lock()
 		state, ok := m.nodeMap[m.config.Name]
+		incarnation := state.Incarnation
+		name := state.Name
 		m.nodeLock.Unlock()
 		if !ok {
 			m.logger.Printf("[WARN] memberlist: Leave but we're not in the node map.")
@@ -666,9 +668,9 @@ func (m *Memberlist) Leave(timeout time.Duration) error {
 		// intentionally. When Node equals From, other nodes know for
 		// sure this node is gone.
 		d := dead{
-			Incarnation: state.Incarnation,
-			Node:        state.Name,
-			From:        state.Name,
+			Incarnation: incarnation,
+			Node:        name,
+			From:        name,
 		}
 		m.deadNode(&d)
 
