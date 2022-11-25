@@ -170,6 +170,14 @@ func (m *Memberlist) triggerFunc(stagger time.Duration, C <-chan time.Time, stop
 		select {
 		case <-C:
 			f()
+
+			// If f() takes a long time, we need check stop after f() returns
+			// to avoid random picking in select and never returns.
+			select {
+			case <-stop:
+				return
+			default:
+			}
 		case <-stop:
 			return
 		}
