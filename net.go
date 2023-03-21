@@ -99,7 +99,7 @@ type ping struct {
 	// restart with a new name.
 	Node string
 
-	SourceAddr []byte `codec:",omitempty"` // Source address, used for a direct reply
+	SourceHost string `codec:",omitempty"` // Source address, used for a direct reply
 	SourcePort uint16 `codec:",omitempty"` // Source port, used for a direct reply
 	SourceNode string `codec:",omitempty"` // Source name, used for a direct reply
 }
@@ -107,7 +107,7 @@ type ping struct {
 // indirect ping sent to an indirect node
 type indirectPingReq struct {
 	SeqNo  uint32
-	Target []byte
+	Target string
 	Port   uint16
 
 	// Node is sent so the target can verify they are
@@ -117,7 +117,7 @@ type indirectPingReq struct {
 
 	Nack bool // true if we'd like a nack back
 
-	SourceAddr []byte `codec:",omitempty"` // Source address, used for a direct reply
+	SourceHost string `codec:",omitempty"` // Source address, used for a direct reply
 	SourcePort uint16 `codec:",omitempty"` // Source port, used for a direct reply
 	SourceNode string `codec:",omitempty"` // Source name, used for a direct reply
 }
@@ -152,7 +152,7 @@ type suspect struct {
 type alive struct {
 	Incarnation uint32
 	Node        string
-	Addr        []byte
+	Host        string
 	Port        uint16
 	Meta        []byte
 
@@ -186,7 +186,7 @@ type userMsgHeader struct {
 // transferring out node states
 type pushNodeState struct {
 	Name        string
-	Addr        []byte
+	Host        string
 	Port        uint16
 	Meta        []byte
 	Incarnation uint32
@@ -566,8 +566,8 @@ func (m *Memberlist) handlePing(buf []byte, from net.Addr) {
 	}
 
 	addr := ""
-	if len(p.SourceAddr) > 0 && p.SourcePort > 0 {
-		addr = joinHostPort(net.IP(p.SourceAddr).String(), p.SourcePort)
+	if len(p.SourceHost) > 0 && p.SourcePort > 0 {
+		addr = joinHostPort(p.SourceHost, p.SourcePort)
 	} else {
 		addr = from.String()
 	}
@@ -596,12 +596,12 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 
 	// Send a ping to the correct host.
 	localSeqNo := m.nextSeqNo()
-	selfAddr, selfPort := m.getAdvertise()
+	selfHost, selfPort := m.getAdvertise()
 	ping := ping{
 		SeqNo: localSeqNo,
 		Node:  ind.Node,
 		// The outbound message is addressed FROM us.
-		SourceAddr: selfAddr,
+		SourceHost: selfHost,
 		SourcePort: selfPort,
 		SourceNode: m.config.Name,
 	}
@@ -610,8 +610,8 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 	// use that otherwise assume that the other end of the UDP socket is
 	// usable.
 	indAddr := ""
-	if len(ind.SourceAddr) > 0 && ind.SourcePort > 0 {
-		indAddr = joinHostPort(net.IP(ind.SourceAddr).String(), ind.SourcePort)
+	if len(ind.SourceHost) > 0 && ind.SourcePort > 0 {
+		indAddr = joinHostPort(ind.SourceHost, ind.SourcePort)
 	} else {
 		indAddr = from.String()
 	}
@@ -634,7 +634,7 @@ func (m *Memberlist) handleIndirectPing(buf []byte, from net.Addr) {
 	m.setAckHandler(localSeqNo, respHandler, m.config.ProbeTimeout)
 
 	// Send the ping.
-	addr := joinHostPort(net.IP(ind.Target).String(), ind.Port)
+	addr := joinHostPort(ind.Target, ind.Port)
 	a := Address{
 		Addr: addr,
 		Name: ind.Node,
@@ -693,7 +693,7 @@ func (m *Memberlist) handleSuspect(buf []byte, from net.Addr) {
 // ensureCanConnect return the IP from a RemoteAddress
 // return error if this client must not connect
 func (m *Memberlist) ensureCanConnect(from net.Addr) error {
-	if !m.config.IPMustBeChecked() {
+	if !m.config.HostMustBeChecked() {
 		return nil
 	}
 	source := from.String()
@@ -705,11 +705,7 @@ func (m *Memberlist) ensureCanConnect(from net.Addr) error {
 		return err
 	}
 
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("Cannot parse IP from %s", host)
-	}
-	return m.config.IPAllowed(ip)
+	return m.config.HostAllowed(host)
 }
 
 func (m *Memberlist) handleAlive(buf []byte, from net.Addr) {
@@ -722,11 +718,10 @@ func (m *Memberlist) handleAlive(buf []byte, from net.Addr) {
 		m.logger.Printf("[ERR] memberlist: Failed to decode alive message: %s %s", err, LogAddress(from))
 		return
 	}
-	if m.config.IPMustBeChecked() {
-		innerIP := net.IP(live.Addr)
-		if innerIP != nil {
-			if err := m.config.IPAllowed(innerIP); err != nil {
-				m.logger.Printf("[DEBUG] memberlist: Blocked alive.Addr=%s message from: %s %s", innerIP.String(), err, LogAddress(from))
+	if m.config.HostMustBeChecked() {
+		if live.Host != "" {
+			if err := m.config.HostAllowed(live.Host); err != nil {
+				m.logger.Printf("[DEBUG] memberlist: Blocked alive.Addr=%s message from: %s %s", live.Host, err, LogAddress(from))
 				return
 			}
 		}
@@ -998,7 +993,7 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	localNodes := make([]pushNodeState, len(m.nodes))
 	for idx, n := range m.nodes {
 		localNodes[idx].Name = n.Name
-		localNodes[idx].Addr = n.Addr
+		localNodes[idx].Host = n.Host
 		localNodes[idx].Port = n.Port
 		localNodes[idx].Incarnation = n.Incarnation
 		localNodes[idx].State = n.State
@@ -1262,7 +1257,7 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 		for idx, n := range remoteNodes {
 			nodes[idx] = &Node{
 				Name:  n.Name,
-				Addr:  n.Addr,
+				Host:  n.Host,
 				Port:  n.Port,
 				Meta:  n.Meta,
 				State: n.State,
