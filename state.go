@@ -40,7 +40,7 @@ const (
 // Node represents a node in the cluster.
 type Node struct {
 	Name  string
-	Addr  net.IP
+	Host  string
 	Port  uint16
 	Meta  []byte        // Metadata from the delegate for this node.
 	State NodeStateType // State of the node.
@@ -55,14 +55,14 @@ type Node struct {
 // Address returns the host:port form of a node's address, suitable for use
 // with a transport.
 func (n *Node) Address() string {
-	return joinHostPort(n.Addr.String(), n.Port)
+	return joinHostPort(n.Host, n.Port)
 }
 
 // FullAddress returns the node name and host:port form of a node's address,
 // suitable for use with a transport.
 func (n *Node) FullAddress() Address {
 	return Address{
-		Addr: joinHostPort(n.Addr.String(), n.Port),
+		Addr: joinHostPort(n.Host, n.Port),
 		Name: n.Name,
 	}
 }
@@ -320,11 +320,11 @@ func (m *Memberlist) probeNode(node *nodeState) {
 	}
 
 	// Prepare a ping message and setup an ack handler.
-	selfAddr, selfPort := m.getAdvertise()
+	selfHost, selfPort := m.getAdvertise()
 	ping := ping{
 		SeqNo:      m.nextSeqNo(),
 		Node:       node.Name,
-		SourceAddr: selfAddr,
+		SourceHost: selfHost,
 		SourcePort: selfPort,
 		SourceNode: m.config.Name,
 	}
@@ -431,13 +431,13 @@ HANDLE_REMOTE_FAILURE:
 
 	// Attempt an indirect ping.
 	expectedNacks := 0
-	selfAddr, selfPort = m.getAdvertise()
+	selfHost, selfPort = m.getAdvertise()
 	ind := indirectPingReq{
 		SeqNo:      ping.SeqNo,
-		Target:     node.Addr,
+		Target:     node.Host,
 		Port:       node.Port,
 		Node:       node.Name,
-		SourceAddr: selfAddr,
+		SourceHost: selfHost,
 		SourcePort: selfPort,
 		SourceNode: m.config.Name,
 	}
@@ -531,11 +531,11 @@ HANDLE_REMOTE_FAILURE:
 // Ping initiates a ping to the node with the specified name.
 func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, error) {
 	// Prepare a ping message and setup an ack handler.
-	selfAddr, selfPort := m.getAdvertise()
+	selfHost, selfPort := m.getAdvertise()
 	ping := ping{
 		SeqNo:      m.nextSeqNo(),
 		Node:       node,
-		SourceAddr: selfAddr,
+		SourceHost: selfHost,
 		SourcePort: selfPort,
 		SourceNode: m.config.Name,
 	}
@@ -935,7 +935,7 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 	a := alive{
 		Incarnation: inc,
 		Node:        me.Name,
-		Addr:        me.Addr,
+		Host:        me.Host,
 		Port:        me.Port,
 		Meta:        me.Meta,
 		Vsn: []uint8{
@@ -943,7 +943,7 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 			me.DMin, me.DMax, me.DCur,
 		},
 	}
-	m.encodeAndBroadcast(me.Addr.String(), aliveMsg, a)
+	m.encodeAndBroadcast(me.Host, aliveMsg, a)
 }
 
 // aliveNode is invoked by the network layer when we get a message about a
@@ -966,7 +966,9 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		pMax := a.Vsn[1]
 		pCur := a.Vsn[2]
 		if pMin == 0 || pMax == 0 || pMin > pMax {
-			m.logger.Printf("[WARN] memberlist: Ignoring an alive message for '%s' (%v:%d) because protocol version(s) are wrong: %d <= %d <= %d should be >0", a.Node, net.IP(a.Addr), a.Port, pMin, pCur, pMax)
+			m.logger.Printf("[WARN] memberlist: Ignoring an alive message for "+
+				"'%s' (%s:%d) because protocol version(s) are wrong: %d <= %d <= %d should be >0",
+				a.Node, a.Host, a.Port, pMin, pCur, pMax)
 			return
 		}
 	}
@@ -977,13 +979,13 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	// cluster merging to still occur.
 	if m.config.Alive != nil {
 		if len(a.Vsn) < 6 {
-			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s' (%v:%d) because Vsn is not present",
-				a.Node, net.IP(a.Addr), a.Port)
+			m.logger.Printf("[WARN] memberlist: ignoring alive message for '%s' (%s:%d) because Vsn is not present",
+				a.Node, a.Host, a.Port)
 			return
 		}
 		node := &Node{
 			Name: a.Node,
-			Addr: a.Addr,
+			Host: a.Host,
 			Port: a.Port,
 			Meta: a.Meta,
 			PMin: a.Vsn[0],
@@ -1004,15 +1006,15 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	// store this node in our node map.
 	var updatesNode bool
 	if !ok {
-		errCon := m.config.IPAllowed(a.Addr)
+		errCon := m.config.HostAllowed(a.Host)
 		if errCon != nil {
-			m.logger.Printf("[WARN] memberlist: Rejected node %s (%v): %s", a.Node, net.IP(a.Addr), errCon)
+			m.logger.Printf("[WARN] memberlist: Rejected node %s (%s): %s", a.Node, a.Host, errCon)
 			return
 		}
 		state = &nodeState{
 			Node: Node{
 				Name: a.Node,
-				Addr: a.Addr,
+				Host: a.Host,
 				Port: a.Port,
 				Meta: a.Meta,
 			},
@@ -1045,30 +1047,30 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		atomic.AddUint32(&m.numNodes, 1)
 	} else {
 		// Check if this address is different than the existing node unless the old node is dead.
-		if !bytes.Equal([]byte(state.Addr), a.Addr) || state.Port != a.Port {
-			errCon := m.config.IPAllowed(a.Addr)
+		if state.Host != a.Host || state.Port != a.Port {
+			errCon := m.config.HostAllowed(a.Host)
 			if errCon != nil {
-				m.logger.Printf("[WARN] memberlist: Rejected IP update from %v to %v for node %s: %s", a.Node, state.Addr, net.IP(a.Addr), errCon)
+				m.logger.Printf("[WARN] memberlist: Rejected IP update from %s to %s for node %s: %s", a.Node, state.Host, a.Host, errCon)
 				return
 			}
 			// If DeadNodeReclaimTime is configured, check if enough time has elapsed since the node died.
-			canReclaim := (m.config.DeadNodeReclaimTime > 0 &&
-				time.Since(state.StateChange) > m.config.DeadNodeReclaimTime)
+			canReclaim := m.config.DeadNodeReclaimTime > 0 &&
+				time.Since(state.StateChange) > m.config.DeadNodeReclaimTime
 
 			// Allow the address to be updated if a dead node is being replaced.
 			if state.State == StateLeft || (state.State == StateDead && canReclaim) {
-				m.logger.Printf("[INFO] memberlist: Updating address for left or failed node %s from %v:%d to %v:%d",
-					state.Name, state.Addr, state.Port, net.IP(a.Addr), a.Port)
+				m.logger.Printf("[INFO] memberlist: Updating address for left or failed node %s from %s:%d to %v:%d",
+					state.Name, state.Host, state.Port, a.Host, a.Port)
 				updatesNode = true
 			} else {
-				m.logger.Printf("[ERR] memberlist: Conflicting address for %s. Mine: %v:%d Theirs: %v:%d Old state: %v",
-					state.Name, state.Addr, state.Port, net.IP(a.Addr), a.Port, state.State)
+				m.logger.Printf("[ERR] memberlist: Conflicting address for %s. Mine: %s:%d Theirs: %s:%d Old state: %v",
+					state.Name, state.Host, state.Port, a.Host, a.Port, state.State)
 
 				// Inform the conflict delegate if provided
 				if m.config.Conflict != nil {
 					other := Node{
 						Name: a.Node,
-						Addr: a.Addr,
+						Host: a.Host,
 						Port: a.Port,
 						Meta: a.Meta,
 					}
@@ -1122,7 +1124,8 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 			return
 		}
 		m.refute(state, a.Incarnation)
-		m.logger.Printf("[WARN] memberlist: Refuting an alive message for '%s' (%v:%d) meta:(%v VS %v), vsn:(%v VS %v)", a.Node, net.IP(a.Addr), a.Port, a.Meta, state.Meta, a.Vsn, versions)
+		m.logger.Printf("[WARN] memberlist: Refuting an alive message for '%s' (%s:%d) meta:(%v VS %v), vsn:(%v VS %v)",
+			a.Node, a.Host, a.Port, a.Meta, state.Meta, a.Vsn, versions)
 	} else {
 		m.encodeBroadcastNotify(a.Node, aliveMsg, a, notify)
 
@@ -1139,7 +1142,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		// Update the state and incarnation number
 		state.Incarnation = a.Incarnation
 		state.Meta = a.Meta
-		state.Addr = a.Addr
+		state.Host = a.Host
 		state.Port = a.Port
 		if state.State != StateAlive {
 			state.State = StateAlive
@@ -1326,7 +1329,7 @@ func (m *Memberlist) mergeState(remote []pushNodeState) {
 			a := alive{
 				Incarnation: r.Incarnation,
 				Node:        r.Name,
-				Addr:        r.Addr,
+				Host:        r.Host,
 				Port:        r.Port,
 				Meta:        r.Meta,
 				Vsn:         r.Vsn,

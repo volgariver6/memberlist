@@ -3,6 +3,7 @@ package memberlist
 import (
 	"bytes"
 	"fmt"
+	"github.com/hashicorp/go-sockaddr"
 	"io"
 	"log"
 	"net"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/armon/go-metrics"
-	sockaddr "github.com/hashicorp/go-sockaddr"
 )
 
 const (
@@ -134,49 +134,29 @@ func (t *NetTransport) GetAutoBindPort() int {
 }
 
 // See Transport.
-func (t *NetTransport) FinalAdvertiseAddr(ip string, port int) (net.IP, int, error) {
-	var advertiseAddr net.IP
-	var advertisePort int
-	if ip != "" {
-		// If they've supplied an address, use that.
-		advertiseAddr = net.ParseIP(ip)
-		if advertiseAddr == nil {
-			return nil, 0, fmt.Errorf("Failed to parse advertise address %q", ip)
-		}
-
-		// Ensure IPv4 conversion if necessary.
-		if ip4 := advertiseAddr.To4(); ip4 != nil {
-			advertiseAddr = ip4
-		}
-		advertisePort = port
-	} else {
+func (t *NetTransport) FinalAdvertiseHost(host string, port int) (string, int, error) {
+	if host == "" {
 		if t.config.BindAddrs[0] == "0.0.0.0" {
 			// Otherwise, if we're not bound to a specific IP, let's
 			// use a suitable private IP address.
 			var err error
-			ip, err = sockaddr.GetPrivateIP()
+			host, err = sockaddr.GetPrivateIP()
 			if err != nil {
-				return nil, 0, fmt.Errorf("Failed to get interface addresses: %v", err)
+				return "", 0, fmt.Errorf("Failed to get interface addresses: %v", err)
 			}
-			if ip == "" {
-				return nil, 0, fmt.Errorf("No private IP address found, and explicit IP not provided")
-			}
-
-			advertiseAddr = net.ParseIP(ip)
-			if advertiseAddr == nil {
-				return nil, 0, fmt.Errorf("Failed to parse advertise address: %q", ip)
+			if host == "" {
+				return "", 0, fmt.Errorf("No private IP address found, and explicit IP not provided")
 			}
 		} else {
 			// Use the IP that we're bound to, based on the first
 			// TCP listener, which we already ensure is there.
-			advertiseAddr = t.tcpListeners[0].Addr().(*net.TCPAddr).IP
+			host = t.tcpListeners[0].Addr().(*net.TCPAddr).IP.String()
 		}
 
 		// Use the port we are bound to.
-		advertisePort = t.GetAutoBindPort()
+		port = t.GetAutoBindPort()
 	}
-
-	return advertiseAddr, advertisePort, nil
+	return host, port, nil
 }
 
 // See Transport.

@@ -36,7 +36,7 @@ func TestHandleCompoundPing(t *testing.T) {
 	// Encode a ping
 	ping := ping{
 		SeqNo:      42,
-		SourceAddr: udpAddr.IP,
+		SourceHost: udpAddr.IP.String(),
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
@@ -105,7 +105,7 @@ func TestHandlePing(t *testing.T) {
 	// Encode a ping
 	ping := ping{
 		SeqNo:      42,
-		SourceAddr: udpAddr.IP,
+		SourceHost: udpAddr.IP.String(),
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
@@ -170,7 +170,7 @@ func TestHandlePing_WrongNode(t *testing.T) {
 	ping := ping{
 		SeqNo:      42,
 		Node:       m.config.Name + "-bad",
-		SourceAddr: udpAddr.IP,
+		SourceHost: udpAddr.IP.String(),
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
@@ -211,10 +211,10 @@ func TestHandleIndirectPing(t *testing.T) {
 	// Encode an indirect ping
 	ind := indirectPingReq{
 		SeqNo:      100,
-		Target:     net.ParseIP(m.config.BindAddr),
+		Target:     m.config.BindAddr,
 		Port:       uint16(m.config.BindPort),
 		Node:       m.config.Name,
-		SourceAddr: udpAddr.IP,
+		SourceHost: udpAddr.IP.String(),
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}
@@ -470,7 +470,7 @@ func TestTCPPushPull(t *testing.T) {
 	m.nodes = append(m.nodes, &nodeState{
 		Node: Node{
 			Name: "Test 0",
-			Addr: net.ParseIP(m.config.BindAddr),
+			Host: m.config.BindAddr,
 			Port: uint16(m.config.BindPort),
 		},
 		Incarnation: 0,
@@ -487,17 +487,17 @@ func TestTCPPushPull(t *testing.T) {
 
 	localNodes := make([]pushNodeState, 3)
 	localNodes[0].Name = "Test 0"
-	localNodes[0].Addr = net.ParseIP(m.config.BindAddr)
+	localNodes[0].Host = m.config.BindAddr
 	localNodes[0].Port = uint16(m.config.BindPort)
 	localNodes[0].Incarnation = 1
 	localNodes[0].State = StateAlive
 	localNodes[1].Name = "Test 1"
-	localNodes[1].Addr = net.ParseIP(m.config.BindAddr)
+	localNodes[1].Host = m.config.BindAddr
 	localNodes[1].Port = uint16(m.config.BindPort)
 	localNodes[1].Incarnation = 1
 	localNodes[1].State = StateAlive
 	localNodes[2].Name = "Test 2"
-	localNodes[2].Addr = net.ParseIP(m.config.BindAddr)
+	localNodes[2].Host = m.config.BindAddr
 	localNodes[2].Port = uint16(m.config.BindPort)
 	localNodes[2].Incarnation = 1
 	localNodes[2].State = StateAlive
@@ -577,7 +577,7 @@ func TestTCPPushPull(t *testing.T) {
 	if n.Name != "Test 0" {
 		t.Fatalf("bad name")
 	}
-	if bytes.Compare(n.Addr, net.ParseIP(m.config.BindAddr)) != 0 {
+	if n.Host != m.config.BindAddr {
 		t.Fatal("bad addr")
 	}
 	if n.Incarnation != 0 {
@@ -596,7 +596,7 @@ func TestSendMsg_Piggyback(t *testing.T) {
 	a := alive{
 		Incarnation: 10,
 		Node:        "rand",
-		Addr:        []byte{127, 0, 0, 255},
+		Host:        "127.0.0.255",
 		Meta:        nil,
 		Vsn: []uint8{
 			ProtocolVersionMin, ProtocolVersionMax, ProtocolVersionMin,
@@ -613,7 +613,7 @@ func TestSendMsg_Piggyback(t *testing.T) {
 	// Encode a ping
 	ping := ping{
 		SeqNo:      42,
-		SourceAddr: udpAddr.IP,
+		SourceHost: udpAddr.IP.String(),
 		SourcePort: uint16(udpAddr.Port),
 		SourceNode: "test",
 	}

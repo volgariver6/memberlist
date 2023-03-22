@@ -246,10 +246,10 @@ type Config struct {
 	// a message to that node.
 	RequireNodeNames bool
 
-	// CIDRsAllowed If nil, allow any connection (default), otherwise specify all networks
-	// allowed to connect (you must specify IPv6/IPv4 separately)
+	// HostsAllowed If nil, allow any connection (default), otherwise specify all networks
+	// allowed to connect.
 	// Using [] will block all connections.
-	CIDRsAllowed []net.IPNet
+	HostsAllowed []string
 
 	// MetricLabels is a map of optional labels to apply to all metrics emitted.
 	MetricLabels []metrics.Label
@@ -325,7 +325,7 @@ func DefaultLANConfig() *Config {
 
 		HandoffQueueDepth: 1024,
 		UDPBufferSize:     1400,
-		CIDRsAllowed:      nil, // same as allow all
+		HostsAllowed:      nil, // same as allow all
 
 		QueueCheckInterval: 30 * time.Second,
 	}
@@ -347,22 +347,22 @@ func DefaultWANConfig() *Config {
 	return conf
 }
 
-// IPMustBeChecked return true if IPAllowed must be called
-func (c *Config) IPMustBeChecked() bool {
-	return len(c.CIDRsAllowed) > 0
+// HostMustBeChecked return true if HostAllowed must be called
+func (c *Config) HostMustBeChecked() bool {
+	return len(c.HostsAllowed) > 0
 }
 
-// IPAllowed return an error if access to memberlist is denied
-func (c *Config) IPAllowed(ip net.IP) error {
-	if !c.IPMustBeChecked() {
+// HostAllowed return an error if access to memberlist is denied
+func (c *Config) HostAllowed(host string) error {
+	if !c.HostMustBeChecked() {
 		return nil
 	}
-	for _, n := range c.CIDRsAllowed {
-		if n.Contains(ip) {
+	for _, n := range c.HostsAllowed {
+		if n == host {
 			return nil
 		}
 	}
-	return fmt.Errorf("%s is not allowed", ip)
+	return fmt.Errorf("%s is not allowed", host)
 }
 
 // DefaultLocalConfig works like DefaultConfig, however it returns a configuration

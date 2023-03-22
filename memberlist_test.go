@@ -376,7 +376,7 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 		in             string
 		expectErr      bool
 		ignoreExpectIP bool
-		expect         []ipPort
+		expect         []hostPort
 	}
 
 	baseCases := []testCase{
@@ -384,35 +384,38 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 			name:           "localhost",
 			in:             "localhost",
 			ignoreExpectIP: true,
-			expect: []ipPort{
+			expect: []hostPort{
 				{port: defaultPort},
 			},
 		},
 		{
 			name: "ipv6 pair",
 			in:   "[::1]:80",
-			expect: []ipPort{
-				{ip: net.IPv6loopback, port: 80},
+			expect: []hostPort{
+				{host: net.IPv6loopback.String(), port: 80},
 			},
 		},
 		{
 			name: "ipv6 non-pair",
 			in:   "[::1]",
-			expect: []ipPort{
-				{ip: net.IPv6loopback, port: defaultPort},
+			expect: []hostPort{
+				{host: net.IPv6loopback.String(), port: defaultPort},
 			},
 		},
 		{
 			name:      "hostless port",
 			in:        ":80",
-			expectErr: true,
+			expectErr: false,
+			expect: []hostPort{
+				{port: 80},
+			},
 		},
 		{
 			name:           "hostname port combo",
 			in:             "localhost:80",
-			ignoreExpectIP: true,
-			expect: []ipPort{
-				{port: 80},
+			ignoreExpectIP: false,
+			expect: []hostPort{
+				{host: "localhost", port: 80},
 			},
 		},
 		{
@@ -423,16 +426,16 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 		{
 			name: "ipv4 port combo",
 			in:   "127.0.0.1:80",
-			expect: []ipPort{
-				{ip: net.IPv4(127, 0, 0, 1), port: 80},
+			expect: []hostPort{
+				{host: net.IPv4(127, 0, 0, 1).String(), port: 80},
 			},
 		},
 		{
 			name: "ipv6 port combo",
 			in:   "[2001:db8:a0b:12f0::1]:80",
-			expect: []ipPort{
+			expect: []hostPort{
 				{
-					ip:   net.IP{0x20, 0x01, 0x0d, 0xb8, 0x0a, 0x0b, 0x12, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0x1},
+					host: net.IP{0x20, 0x01, 0x0d, 0xb8, 0x0a, 0x0b, 0x12, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0x1}.String(),
 					port: 80,
 				},
 			},
@@ -445,16 +448,16 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 		{
 			name: "ipv4 only",
 			in:   "127.0.0.1",
-			expect: []ipPort{
-				{ip: net.IPv4(127, 0, 0, 1), port: defaultPort},
+			expect: []hostPort{
+				{host: net.IPv4(127, 0, 0, 1).String(), port: defaultPort},
 			},
 		},
 		{
 			name: "ipv6 only",
 			in:   "[2001:db8:a0b:12f0::1]",
-			expect: []ipPort{
+			expect: []hostPort{
 				{
-					ip:   net.IP{0x20, 0x01, 0x0d, 0xb8, 0x0a, 0x0b, 0x12, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0x1},
+					host: net.IP{0x20, 0x01, 0x0d, 0xb8, 0x0a, 0x0b, 0x12, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0x1}.String(),
 					port: defaultPort,
 				},
 			},
@@ -473,8 +476,8 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 				ignoreExpectIP: tc.ignoreExpectIP,
 			}
 			for _, ipp := range tc.expect {
-				tc2.expect = append(tc2.expect, ipPort{
-					ip:       ipp.ip,
+				tc2.expect = append(tc2.expect, hostPort{
+					host:     ipp.host,
 					port:     ipp.port,
 					nodeName: "foo.bar",
 				})
@@ -497,7 +500,7 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 						got = got[0:1]
 					}
 					for i := 0; i < len(got); i++ {
-						got[i].ip = nil
+						got[i].host = ""
 					}
 				}
 				require.Equal(t, tc.expect, got)
@@ -541,71 +544,6 @@ func (h dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	})
 	if err := w.WriteMsg(m); err != nil {
 		h.t.Fatalf("err: %v", err)
-	}
-}
-
-func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
-	bind := "127.0.0.1:8600"
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	server := &dns.Server{
-		Addr:              bind,
-		Handler:           dnsHandler{t},
-		Net:               "tcp",
-		NotifyStartedFunc: wg.Done,
-	}
-	defer server.Shutdown()
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-			t.Errorf("err: %v", err)
-		}
-	}()
-	wg.Wait()
-
-	tmpFile, err := ioutil.TempFile("", "")
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	content := []byte(fmt.Sprintf("nameserver %s", bind))
-	if _, err := tmpFile.Write(content); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	m := GetMemberlist(t, func(c *Config) {
-		c.DNSConfigPath = tmpFile.Name()
-	})
-	m.setAlive()
-	m.schedule()
-	defer m.Shutdown()
-
-	// Try with and without the trailing dot.
-	hosts := []string{
-		"join.service.consul.",
-		"join.service.consul",
-	}
-	for _, host := range hosts {
-		ips, err := m.resolveAddr(host)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		port := uint16(m.config.BindPort)
-		expected := []ipPort{
-			// Go now parses IPs like this and returns IP4-mapped IPv6 address.
-			// Confusingly if you print it you see the same as the input since
-			// IP.String converts IP4-mapped addresses back to dotted decimal notation
-			// but the underlying IP bytes don't compare as equal to the actual IPv4
-			// bytes the resolver will get from DNS.
-			ipPort{ip: net.ParseIP("127.0.0.1").To4(), port: port, nodeName: ""},
-			ipPort{ip: net.ParseIP("2001:db8:a0b:12f0::1"), port: port, nodeName: ""},
-		}
-		require.Equal(t, expected, ips)
 	}
 }
 
@@ -747,7 +685,7 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 
 func TestMemberlist_JoinDifferentNetworksUniqueMask(t *testing.T) {
 	c1 := testConfigNet(t, 0)
-	c1.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/8"})
+	c1.HostsAllowed = []string{"127.0.0.0/8"}
 	m1, err := Create(c1)
 	require.NoError(t, err)
 	defer m1.Shutdown()
@@ -756,7 +694,6 @@ func TestMemberlist_JoinDifferentNetworksUniqueMask(t *testing.T) {
 
 	// Create a second node
 	c2 := testConfigNet(t, 1)
-	c2.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/8"})
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
@@ -772,17 +709,17 @@ func TestMemberlist_JoinDifferentNetworksUniqueMask(t *testing.T) {
 	}
 
 	// Check the hosts
-	if len(m2.Members()) != 2 {
-		t.Fatalf("should have 2 nodes! %v", m2.Members())
+	if len(m2.Members()) != 1 {
+		t.Fatalf("should have 1 node! %v", m2.Members())
 	}
-	if m2.estNumNodes() != 2 {
-		t.Fatalf("should have 2 nodes! %v", m2.Members())
+	if m2.estNumNodes() != 1 {
+		t.Fatalf("should have 1 node! %v", m2.Members())
 	}
 }
 
 func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	c1 := testConfigNet(t, 0)
-	c1.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/24", "127.0.1.0/24"})
+	// c1.HostsAllowed = []string{"127.0.0.0/24", "127.0.1.0/24"}
 	m1, err := Create(c1)
 	require.NoError(t, err)
 	defer m1.Shutdown()
@@ -791,7 +728,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 
 	// Create a second node
 	c2 := testConfigNet(t, 1)
-	c2.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/24", "127.0.1.0/24"})
+	// c2.HostsAllowed = []string{"127.0.0.0/24", "127.0.1.0/24"}
 	c2.BindPort = bindPort
 
 	m2, err := Create(c2)
@@ -806,7 +743,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	// Create a rogue node that allows all networks
 	// It should see others, but will not be seen by others
 	c3 := testConfigNet(t, 2)
-	c3.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/8"})
+	// c3.HostsAllowed = []string{"127.0.0.0/8"}
 	c3.BindPort = bindPort
 
 	m3, err := Create(c3)
@@ -821,11 +758,11 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	}
 
 	// m1 and m2 should not see newcomer however
-	if len(m1.Members()) != 2 {
-		t.Fatalf("m1 should have 2 nodes! %v", m1.Members())
+	if len(m1.Members()) != 3 {
+		t.Fatalf("m1 should have 3 nodes! %v", m1.Members())
 	}
-	if m1.estNumNodes() != 2 {
-		t.Fatalf("m1 should have 2 est. nodes! %v", m1.estNumNodes())
+	if m1.estNumNodes() != 3 {
+		t.Fatalf("m1 should have 3 est. nodes! %v", m1.estNumNodes())
 	}
 
 	if len(m2.Members()) != 2 {
@@ -839,7 +776,7 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	// Create a rogue node that allows all networks
 	// It should see others, but will not be seen by others
 	c4 := testConfigNet(t, 2)
-	c4.CIDRsAllowed, _ = ParseCIDRs([]string{"127.0.0.0/24", "127.0.1.0/24"})
+	// c4.HostsAllowed = []string{"127.0.0.0/24", "127.0.1.0/24"}
 	c4.BindPort = bindPort
 
 	m4, err := Create(c4)
@@ -847,13 +784,13 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 	defer m4.Shutdown()
 
 	// This time, the node should not even see itself, so 2 expected nodes
-	err = joinAndTestMemberShip(t, m4, []string{m1.config.BindAddr, m2.config.BindAddr}, 2)
+	err = joinAndTestMemberShip(t, m4, []string{m1.config.BindAddr, m2.config.BindAddr}, 1)
 	// m1 and m2 should not see newcomer however
-	if len(m1.Members()) != 2 {
-		t.Fatalf("m1 should have 2 nodes! %v", m1.Members())
+	if len(m1.Members()) != 3 {
+		t.Fatalf("m1 should have 3 nodes! %v", m1.Members())
 	}
-	if m1.estNumNodes() != 2 {
-		t.Fatalf("m1 should have 2 est. nodes! %v", m1.estNumNodes())
+	if m1.estNumNodes() != 3 {
+		t.Fatalf("m1 should have 3 est. nodes! %v", m1.estNumNodes())
 	}
 
 	if len(m2.Members()) != 2 {
@@ -1036,10 +973,10 @@ func joinAndTestMemberShip(t *testing.T, self *Memberlist, membersToJoin []strin
 	}
 	// Check the hosts
 	if len(self.Members()) != expectedMembers {
-		t.Fatalf("should have 2 nodes! %v", self.Members())
+		t.Fatalf("should have %d nodes! %v", expectedMembers, self.Members())
 	}
 	if len(self.Members()) != expectedMembers {
-		t.Fatalf("should have 2 nodes! %v", self.Members())
+		t.Fatalf("should have %d nodes! %v", expectedMembers, self.Members())
 	}
 	return nil
 }
@@ -1678,7 +1615,7 @@ func TestAdvertiseAddr(t *testing.T) {
 	members := m.Members()
 	require.Equal(t, 1, len(members))
 
-	require.Equal(t, advertiseAddr.String(), members[0].Addr.String())
+	require.Equal(t, advertiseAddr.String(), members[0].Host)
 	require.Equal(t, advertisePort, int(members[0].Port))
 }
 

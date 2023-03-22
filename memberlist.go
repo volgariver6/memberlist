@@ -29,7 +29,6 @@ import (
 
 	"github.com/armon/go-metrics"
 	multierror "github.com/hashicorp/go-multierror"
-	sockaddr "github.com/hashicorp/go-sockaddr"
 	"github.com/miekg/dns"
 )
 
@@ -42,7 +41,7 @@ type Memberlist struct {
 	pushPullReq uint32 // Number of push/pull requests
 
 	advertiseLock sync.RWMutex
-	advertiseAddr net.IP
+	advertiseHost string
 	advertisePort uint16
 
 	config         *Config
@@ -277,7 +276,7 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 		}
 
 		for _, addr := range addrs {
-			hp := joinHostPort(addr.ip.String(), addr.port)
+			hp := joinHostPort(addr.host, addr.port)
 			a := Address{Addr: hp, Name: addr.nodeName}
 			if err := m.pushPullNode(a, true); err != nil {
 				err = fmt.Errorf("Failed to join %s: %v", a.Addr, err)
@@ -295,9 +294,9 @@ func (m *Memberlist) Join(existing []string) (int, error) {
 	return numSuccess, errs
 }
 
-// ipPort holds information about a node we want to try to join.
-type ipPort struct {
-	ip       net.IP
+// hostPort holds information about a node we want to try to join.
+type hostPort struct {
+	host     string
 	port     uint16
 	nodeName string // optional
 }
@@ -308,7 +307,7 @@ type ipPort struct {
 // Consul's. By doing the TCP lookup directly, we get the best chance for the
 // largest list of hosts to join. Since joins are relatively rare events, it's ok
 // to do this rather expensive operation.
-func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName string) ([]ipPort, error) {
+func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName string) ([]hostPort, error) {
 	// Don't attempt any TCP lookups against non-fully qualified domain
 	// names, since those will likely come from the resolv.conf file.
 	if !strings.Contains(host, ".") {
@@ -346,13 +345,13 @@ func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName strin
 		}
 
 		// Handle any IPs we get back that we can attempt to join.
-		var ips []ipPort
+		var ips []hostPort
 		for _, r := range in.Answer {
 			switch rr := r.(type) {
 			case (*dns.A):
-				ips = append(ips, ipPort{ip: rr.A, port: defaultPort, nodeName: nodeName})
+				ips = append(ips, hostPort{host: rr.A.String(), port: defaultPort, nodeName: nodeName})
 			case (*dns.AAAA):
-				ips = append(ips, ipPort{ip: rr.AAAA, port: defaultPort, nodeName: nodeName})
+				ips = append(ips, hostPort{host: rr.AAAA.String(), port: defaultPort, nodeName: nodeName})
 			case (*dns.CNAME):
 				m.logger.Printf("[DEBUG] memberlist: Ignoring CNAME RR in TCP-first answer for '%s'", host)
 			}
@@ -365,7 +364,7 @@ func (m *Memberlist) tcpLookupIP(host string, defaultPort uint16, nodeName strin
 
 // resolveAddr is used to resolve the address into an address,
 // port, and error. If no port is given, use the default
-func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
+func (m *Memberlist) resolveAddr(hostStr string) ([]hostPort, error) {
 	// First peel off any leading node name. This is optional.
 	nodeName := ""
 	if slashIdx := strings.Index(hostStr, "/"); slashIdx >= 0 {
@@ -391,35 +390,9 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// If it looks like an IP address we are done. The SplitHostPort() above
 	// will make sure the host part is in good shape for parsing, even for
 	// IPv6 addresses.
-	if ip := net.ParseIP(host); ip != nil {
-		return []ipPort{
-			ipPort{ip: ip, port: port, nodeName: nodeName},
-		}, nil
-	}
-
-	// First try TCP so we have the best chance for the largest list of
-	// hosts to join. If this fails it's not fatal since this isn't a standard
-	// way to query DNS, and we have a fallback below.
-	ips, err := m.tcpLookupIP(host, port, nodeName)
-	if err != nil {
-		m.logger.Printf("[DEBUG] memberlist: TCP-first lookup failed for '%s', falling back to UDP: %s", hostStr, err)
-	}
-	if len(ips) > 0 {
-		return ips, nil
-	}
-
-	// If TCP didn't yield anything then use the normal Go resolver which
-	// will try UDP, then might possibly try TCP again if the UDP response
-	// indicates it was truncated.
-	ans, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-	ips = make([]ipPort, 0, len(ans))
-	for _, ip := range ans {
-		ips = append(ips, ipPort{ip: ip, port: port, nodeName: nodeName})
-	}
-	return ips, nil
+	return []hostPort{
+		{host: host, port: port, nodeName: nodeName},
+	}, nil
 }
 
 // setAlive is used to mark this node as being alive. This is the same
@@ -428,24 +401,9 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 func (m *Memberlist) setAlive() error {
 	// Get the final advertise address from the transport, which may need
 	// to see which address we bound to.
-	addr, port, err := m.refreshAdvertise()
+	host, port, err := m.refreshAdvertise()
 	if err != nil {
 		return err
-	}
-
-	// Check if this is a public address without encryption
-	ipAddr, err := sockaddr.NewIPAddr(addr.String())
-	if err != nil {
-		return fmt.Errorf("Failed to parse interface addresses: %v", err)
-	}
-	ifAddrs := []sockaddr.IfAddr{
-		sockaddr.IfAddr{
-			SockAddr: ipAddr,
-		},
-	}
-	_, publicIfs, err := sockaddr.IfByRFC("6890", ifAddrs)
-	if len(publicIfs) > 0 && !m.config.EncryptionEnabled() {
-		m.logger.Printf("[WARN] memberlist: Binding to public address without encryption!")
 	}
 
 	// Set any metadata from the delegate.
@@ -460,7 +418,7 @@ func (m *Memberlist) setAlive() error {
 	a := alive{
 		Incarnation: m.nextIncarnation(),
 		Node:        m.config.Name,
-		Addr:        addr,
+		Host:        host,
 		Port:        uint16(port),
 		Meta:        meta,
 		Vsn:         m.config.BuildVsnArray(),
@@ -470,27 +428,27 @@ func (m *Memberlist) setAlive() error {
 	return nil
 }
 
-func (m *Memberlist) getAdvertise() (net.IP, uint16) {
+func (m *Memberlist) getAdvertise() (string, uint16) {
 	m.advertiseLock.RLock()
 	defer m.advertiseLock.RUnlock()
-	return m.advertiseAddr, m.advertisePort
+	return m.advertiseHost, m.advertisePort
 }
 
-func (m *Memberlist) setAdvertise(addr net.IP, port int) {
+func (m *Memberlist) setAdvertise(host string, port int) {
 	m.advertiseLock.Lock()
 	defer m.advertiseLock.Unlock()
-	m.advertiseAddr = addr
+	m.advertiseHost = host
 	m.advertisePort = uint16(port)
 }
 
-func (m *Memberlist) refreshAdvertise() (net.IP, int, error) {
-	addr, port, err := m.transport.FinalAdvertiseAddr(
+func (m *Memberlist) refreshAdvertise() (string, int, error) {
+	host, port, err := m.transport.FinalAdvertiseHost(
 		m.config.AdvertiseAddr, m.config.AdvertisePort)
 	if err != nil {
-		return nil, 0, fmt.Errorf("Failed to get final advertise address: %v", err)
+		return "", 0, fmt.Errorf("Failed to get final advertise address: %v", err)
 	}
-	m.setAdvertise(addr, port)
-	return addr, port, nil
+	m.setAdvertise(host, port)
+	return host, port, nil
 }
 
 // LocalNode is used to return the local Node
@@ -525,7 +483,7 @@ func (m *Memberlist) UpdateNode(timeout time.Duration) error {
 	a := alive{
 		Incarnation: m.nextIncarnation(),
 		Node:        m.config.Name,
-		Addr:        state.Addr,
+		Host:        state.Host,
 		Port:        state.Port,
 		Meta:        meta,
 		Vsn:         m.config.BuildVsnArray(),
